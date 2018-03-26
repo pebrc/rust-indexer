@@ -9,8 +9,9 @@ use notify::DebouncedEvent::*;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 use std::path::PathBuf;
-use std::fs::{create_dir_all, remove_file};
+use std::fs::{create_dir_all, metadata, remove_file};
 use std::os::unix::fs::symlink;
+use std::os::unix::fs::MetadataExt;
 use std::io;
 use regex::Regex;
 use chrono::prelude::*;
@@ -43,15 +44,25 @@ fn target_path(target: &str, date: NaiveDate, path: &PathBuf) -> Option<PathBuf>
         })
 }
 
+fn other_error(msg: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, msg)
+}
+
 fn linker<F>(target: &str, date_str: String, path: &PathBuf, op: F) -> io::Result<()>
 where
     F: FnOnce(&PathBuf) -> io::Result<()>,
 {
     parse_date(date_str)
-        .map_err(|pe| io::Error::new(io::ErrorKind::Other, pe.to_string()))
-        .and_then(|d| {
-            target_path(target, d, path)
-                .ok_or(io::Error::new(io::ErrorKind::Other, "no target path"))
+        .map_err(|pe| other_error(&pe.to_string()))
+        .and_then(|d| target_path(target, d, path).ok_or(other_error("no target path")))
+        .and_then(|idx| match (metadata(&idx), metadata(&path)) {
+            //not platform independent ...
+            (Ok(ref stat1), Ok(ref stat2))
+                if stat1.dev() == stat2.dev() && stat1.ino() == stat2.ino() =>
+            {
+                Err(other_error("already indexed"))
+            }
+            _ => Ok(idx),
         })
         .and_then(|index_path| {
             let target_path = index_path.as_path();
@@ -83,7 +94,9 @@ fn link(target: &str, date_str: String, path: &PathBuf) -> io::Result<()> {
 }
 
 fn unlink(target: &str, date_str: String, path: &PathBuf) -> io::Result<()> {
-    linker(target, date_str, path, |_| Ok(()))
+    linker(target, date_str, path, |target_path| {
+        remove_file(target_path)
+    })
 }
 
 fn handle<'a>(target: &str, evt: &'a DebouncedEvent) -> &'a DebouncedEvent {
